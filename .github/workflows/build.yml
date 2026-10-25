@@ -1,0 +1,96 @@
+name: Build
+
+# Runs only when started by hand from the Actions tab: pull requests and pushes never start it.
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: build
+
+jobs:
+  build:
+    runs-on: macos-26
+    timeout-minutes: 355
+    env:
+      # The PC's file server (pc_file_server.py behind `tailscale serve --tcp=8443`).
+      PC: http://100.65.248.88:8443
+      # MacNativeGames at a reviewed commit, so the build does not change underneath us.
+      MNG_REPO: https://github.com/ly05010419/MacNativeGames.git
+      MNG_COMMIT: 5281186af56bdcce6ae9b3bb9daa9791bc02994e
+    steps:
+      - name: Connect to Tailscale
+        uses: tailscale/github-action@v4
+        with:
+          authkey: ${{ secrets.TS_AUTHKEY }}
+          tags: tag:ci
+          hostname: gh-build
+          ping: 100.65.248.88
+
+      - name: Check the PC is serving
+        run: curl -fsS --max-time 20 "$PC/health"
+
+      - name: Free disk space
+        run: |
+          default_xcode="$(xcode-select -p | sed 's#/Contents/Developer##')"
+          for x in /Applications/Xcode*.app; do
+            [ -e "$x" ] || continue
+            [ "$(cd "$x" && pwd -P)" = "$(cd "$default_xcode" && pwd -P)" ] || sudo rm -rf "$x"
+          done
+          sudo rm -rf ~/Library/Android /usr/local/share/dotnet ~/.dotnet /Users/runner/hostedtoolcache
+          xcrun simctl delete all 2>/dev/null || true
+          df -h /
+
+      - name: Install build tools
+        run: |
+          brew install opus libvpx python@3.14 xcodegen cmake ninja
+          xcodebuild -downloadComponent MetalToolchain || echo "Metal toolchain download failed; the build continues without it"
+
+      - name: Get MacNativeGames
+        run: |
+          git init -q "$RUNNER_TEMP/mng"
+          cd "$RUNNER_TEMP/mng"
+          git fetch -q --depth 1 "$MNG_REPO" "$MNG_COMMIT"
+          git checkout -q FETCH_HEAD
+          git log -1 --format='%H %s'
+
+      - name: Download the game files from the PC
+        run: |
+          in="$RUNNER_TEMP/in"
+          mkdir -p "$in/firmware"
+          ( while sleep 60; do echo "downloaded so far: $(du -sh "$in" | cut -f1)"; done ) &
+          progress=$!
+          get() { curl -fsS --retry 10 --retry-all-errors --retry-delay 10 -C - -o "$2" "$PC/$1"; }
+          get files/prod.keys "$in/prod.keys"
+          chmod 600 "$in/prod.keys"
+          for name in $(curl -fsS "$PC/firmware/"); do get "firmware/$name" "$in/firmware/$name"; done
+          get files/update.nsp "$in/update.nsp"
+          get files/game.xci "$in/game.xci"
+          kill "$progress"
+          ls -l "$in"
+          echo "firmware files: $(ls "$in/firmware" | wc -l)"
+
+      - name: Build the iPhone app
+        working-directory: ${{ runner.temp }}/mng
+        run: |
+          mkdir -p "$RUNNER_TEMP/out"
+          python3.14 build_app.py "$RUNNER_TEMP/in/game.xci" \
+            -k "$RUNNER_TEMP/in/prod.keys" \
+            --update "$RUNNER_TEMP/in/update.nsp" \
+            --firmware "$RUNNER_TEMP/in/firmware" \
+            --platform ios \
+            -o "$RUNNER_TEMP/out/BreathOfTheWild.ipa"
+          ls -l "$RUNNER_TEMP/out"
+
+      - name: Send the app back to the PC
+        run: |
+          curl -fsS --retry 5 --retry-all-errors --retry-delay 15 \
+            -T "$RUNNER_TEMP/out/BreathOfTheWild.ipa" "$PC/upload/BreathOfTheWild.ipa"
+
+      # Never upload anything to GitHub: the app contains the game. The machine is wiped after the job
+      # anyway; this removes the files first.
+      - name: Delete the game files
+        if: always()
+        run: rm -rf "$RUNNER_TEMP/in" "$RUNNER_TEMP/out"
