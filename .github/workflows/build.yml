@@ -21,17 +21,6 @@ jobs:
       MNG_REPO: https://github.com/ly05010419/MacNativeGames.git
       MNG_COMMIT: 5281186af56bdcce6ae9b3bb9daa9791bc02994e
     steps:
-      - name: Connect to Tailscale
-        uses: tailscale/github-action@v4
-        with:
-          authkey: ${{ secrets.TS_AUTHKEY }}
-          tags: tag:ci
-          hostname: gh-build
-          ping: 100.65.248.88
-
-      - name: Check the PC is serving
-        run: curl -fsS --max-time 20 "$PC/health"
-
       - name: Free disk space
         run: |
           default_xcode="$(xcode-select -p | sed 's#/Contents/Developer##')"
@@ -55,6 +44,20 @@ jobs:
           git fetch -q --depth 1 "$MNG_REPO" "$MNG_COMMIT"
           git checkout -q FETCH_HEAD
           git log -1 --format='%H %s'
+
+      # Joined after the downloads above. --accept-dns=false keeps the machine's own DNS: with Tailscale's
+      # DNS it could not resolve ghcr.io, so Homebrew failed. The PC is reached by its IP, so no names are needed.
+      - name: Connect to Tailscale
+        uses: tailscale/github-action@v4
+        with:
+          authkey: ${{ secrets.TS_AUTHKEY }}
+          tags: tag:ci
+          hostname: gh-build
+          args: --accept-dns=false
+          ping: 100.65.248.88
+
+      - name: Check the PC is serving
+        run: curl -fsS --max-time 20 "$PC/health"
 
       - name: Download the game files from the PC
         run: |
